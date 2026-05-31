@@ -1,2 +1,1 @@
-# Latihan-pemrograman-Pak-Yu
-Tugas 1 Anti Judi Slot
+# WLP*WLR>1
