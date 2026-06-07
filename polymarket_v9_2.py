@@ -1029,16 +1029,24 @@ class RiskGate:
 #  §13  CLOB ORDER CLIENT
 # ══════════════════════════════════════════════════════════════════════════
 class ClobOrderClient:
-    DOMAIN={"name":"Polymarket CTF Exchange","version":"1","chainId":137,
-             "verifyingContract":"0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"}
+    # V2 (April 28 2026): new contract, version bumped to "2"
+    DOMAIN={"name":"Polymarket CTF Exchange","version":"2","chainId":137,
+             "verifyingContract":"0xE111180000d2663C0091e4f400237545B87B996B"}
+    # V2: removed taker/expiration/nonce/feeRateBps → added timestamp/metadata/builder
     ORDER_TYPE=[
-        {"name":"salt","type":"uint256"},{"name":"maker","type":"address"},
-        {"name":"signer","type":"address"},{"name":"taker","type":"address"},
-        {"name":"tokenId","type":"uint256"},{"name":"makerAmount","type":"uint256"},
-        {"name":"takerAmount","type":"uint256"},{"name":"expiration","type":"uint256"},
-        {"name":"nonce","type":"uint256"},{"name":"feeRateBps","type":"uint256"},
-        {"name":"side","type":"uint8"},{"name":"signatureType","type":"uint8"},
+        {"name":"salt",         "type":"uint256"},
+        {"name":"maker",        "type":"address"},
+        {"name":"signer",       "type":"address"},
+        {"name":"tokenId",      "type":"uint256"},
+        {"name":"makerAmount",  "type":"uint256"},
+        {"name":"takerAmount",  "type":"uint256"},
+        {"name":"side",         "type":"uint8"},
+        {"name":"signatureType","type":"uint8"},
+        {"name":"timestamp",    "type":"uint256"},
+        {"name":"metadata",     "type":"bytes32"},
+        {"name":"builder",      "type":"bytes32"},
     ]
+    ZERO32 = bytes(32)   # zero bytes32 for metadata and builder fields
     def __init__(self):
         self.api_key=CLOB_API_KEY; self.api_secret=CLOB_API_SECRET
         self.passphrase=CLOB_API_PASSPHRASE; self.pk=POLY_PRIVATE_KEY
@@ -1087,17 +1095,33 @@ class ClobOrderClient:
                                limit_price,size_usdc,status="failed",
                                error="CLOB disabled",placed_at=ts)
         price=round(max(0.01,min(0.99,limit_price)),4)
-        od={"salt":int(time.time()*1000),"maker":self.funder,"signer":self.signer,
-            "taker":"0x0000000000000000000000000000000000000000",
+        ts_ms=int(time.time()*1000)
+        # V2 order: no taker/expiration/nonce/feeRateBps → timestamp/metadata/builder
+        od={"salt":ts_ms,"maker":self.funder,"signer":self.signer,
             "tokenId":int(token_id),"makerAmount":int(size_usdc*1e6),
-            "takerAmount":int(size_usdc/price*1e6),"expiration":0,
-            "nonce":0,"feeRateBps":0,"side":0,"signatureType":0}
+            "takerAmount":int(size_usdc/price*1e6),
+            "side":0,"signatureType":0,
+            "timestamp":ts_ms,
+            "metadata":self.ZERO32,
+            "builder":self.ZERO32,
+           }
         try:
             sig=self._sign(od)
         except Exception as e:
             return OrderResult(label,bshort,"",str(token_id),price,size_usdc,
                                status="failed",error=f"sign:{e}",placed_at=ts)
-        pl=json.dumps({"order":{**od,"signature":sig},"owner":self.funder,"orderType":"GTC"})
+        # V2 POST body: side="BUY" string, bytes32 as hex, owner=api_key
+        ZERO32H="0x"+"00"*32
+        body={
+            "salt":str(od["salt"]),"maker":od["maker"],"signer":od["signer"],
+            "tokenId":str(od["tokenId"]),
+            "makerAmount":str(od["makerAmount"]),"takerAmount":str(od["takerAmount"]),
+            "side":"BUY","signatureType":od["signatureType"],
+            "timestamp":str(od["timestamp"]),
+            "metadata":ZERO32H,"builder":ZERO32H,
+            "signature":sig,
+        }
+        pl=json.dumps({"order":body,"owner":self.api_key,"orderType":"GTC"})
         try:
             r=requests.post(f"{CLOB_BASE}/order",data=pl,
                              headers=self._l2("POST","/order",pl),timeout=15)
@@ -1128,7 +1152,10 @@ class ClobOrderClient:
 #  §14  BANKROLL MANAGER
 # ══════════════════════════════════════════════════════════════════════════
 class BankrollManager:
-    USDC="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    # V2 (April 28 2026): collateral changed from USDC.e to pUSD
+    # pUSD is standard ERC-20 on Polygon backed by USDC
+    # Old USDC.e: 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+    USDC="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
     def __init__(self,default=DEFAULT_BANKROLL): self.default=default
     def read_chain(self,wallet)->Optional[float]:
         try:
