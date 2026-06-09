@@ -80,7 +80,7 @@ jobs:
           FAST_SCAN:           'true'   # HANYA cek market baru (<10 menit)
         run: |
           echo "[FAST SCAN] $(date -u '+%H:%M:%S UTC')"
-          python polymarket_v9_2.py
+          python main.py
 
       - name: Save state
         if: always()

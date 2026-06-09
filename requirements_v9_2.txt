@@ -4,6 +4,9 @@ numpy>=1.24.0
 scipy>=1.10.0
 python-dateutil>=2.8.2
 eth-account>=0.9.0
+py-clob-client-v2>=1.0.1
+python-dotenv>=1.0.0
+py-builder-relayer-client>=0.1.0
 
 # Untuk generate_credentials.py (dijalankan sekali di laptop lokal)
 # Install: pip install py-clob-client-v2

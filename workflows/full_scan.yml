@@ -80,7 +80,7 @@ jobs:
           FAST_SCAN:           'false'  # Scan semua market
         run: |
           echo "[FULL SCAN] $(date -u '+%H:%M:%S UTC')"
-          python polymarket_v9_2.py
+          python main.py
 
       - name: Save state
         if: always()

@@ -24,6 +24,11 @@ from scipy.stats import norm
 try:
     from dateutil import parser as du_parser; DATEUTIL_OK=True
 except: DATEUTIL_OK=False
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s [%(levelname)s] %(message)s")
 log=logging.getLogger(__name__)
@@ -38,6 +43,7 @@ POLY_FUNDER         = os.environ.get("POLY_FUNDER","")
 CLOB_API_KEY        = os.environ.get("CLOB_API_KEY","")
 CLOB_API_SECRET     = os.environ.get("CLOB_API_SECRET","")
 CLOB_API_PASSPHRASE = os.environ.get("CLOB_API_PASSPHRASE","")
+POLY_SIGNATURE_TYPE = os.environ.get("POLY_SIGNATURE_TYPE","").strip()
 DRY_RUN             = os.environ.get("DRY_RUN","true").lower()!="false"
 FAST_SCAN           = os.environ.get("FAST_SCAN","false").lower()=="true"
 
@@ -47,8 +53,15 @@ OWM_BASE    = "https://api.open-meteo.com/v1/forecast"
 ENS_BASE    = "https://ensemble-api.open-meteo.com/v1/ensemble"
 METAR_BASE  = "https://www.aviationweather.gov/adds/dataserver_current/httpparam"
 POLY_RPC    = "https://polygon-rpc.com"
+CHAIN_ID    = 137  # Polygon
 
 DEFAULT_BANKROLL  = float(os.environ.get("BANKROLL","100"))
+MAX_ORDER_USDC    = float(os.environ.get("MAX_ORDER_USDC","0") or 0)  # 0 = use % cap only
+MAX_DAILY_USDC    = float(os.environ.get("MAX_DAILY_USDC","0") or 0)  # 0 = use % cap only
+MAX_LIVE_ORDERS   = int(os.environ.get("MAX_LIVE_ORDERS","20") or 20)
+# TEST MODE: >0 = pakai ukuran order tetap (USDC) untuk kandidat SIGNAL/STRONG,
+# bypass sizing Kelly + age_mult. Untuk uji coba modal kecil. 0 = nonaktif (normal).
+FORCE_ORDER_USDC  = float(os.environ.get("FORCE_ORDER_USDC","0") or 0)
 MIN_VOLUME        = 50.0
 COOLDOWN_H        = 6
 PAGES             = 5
@@ -985,7 +998,7 @@ def calc_brackets_full(mu,sigma,brackets,mc_probs,bankroll,ens,
 #  §12  RISK GATE
 # ══════════════════════════════════════════════════════════════════════════
 class RiskGate:
-    DAILY_MAX_BETS=20; DAILY_MAX_PCT=0.40; SINGLE_MAX=0.25
+    DAILY_MAX_BETS=MAX_LIVE_ORDERS; DAILY_MAX_PCT=0.40; SINGLE_MAX=0.25
     DAILY_LOSS_STOP=0.15
     def __init__(self):
         self._today_bets=0; self._today_usdc=0.0; self._load()
@@ -1015,8 +1028,11 @@ class RiskGate:
         return True,"OK"
     def check(self,bk,size,bs,bot_state)->Tuple[bool,str,float]:
         if self._today_bets>=self.DAILY_MAX_BETS: return False,f"RG1: {self.DAILY_MAX_BETS} bets/day",0.0
-        if self._today_usdc+size>bk*self.DAILY_MAX_PCT: return False,"RG1: USDC daily cap",0.0
         size=min(size,bk*self.SINGLE_MAX)
+        if MAX_ORDER_USDC>0: size=min(size,MAX_ORDER_USDC)
+        daily_cap=bk*self.DAILY_MAX_PCT
+        if MAX_DAILY_USDC>0: daily_cap=min(daily_cap,MAX_DAILY_USDC)
+        if self._today_usdc+size>daily_cap: return False,f"RG1: daily cap ${daily_cap:.2f}",0.0
         if size<1.0: return False,"RG6: below $1 min",0.0
         ok,msg=self.check_rg7(bk,bot_state)
         if not ok: return False,msg,0.0
@@ -1051,13 +1067,52 @@ class ClobOrderClient:
         self.api_key=CLOB_API_KEY; self.api_secret=CLOB_API_SECRET
         self.passphrase=CLOB_API_PASSPHRASE; self.pk=POLY_PRIVATE_KEY
         self.funder=POLY_FUNDER; self.account=None; self.signer=""; self.enabled=False
-        if all([self.api_key,self.api_secret,self.passphrase,self.pk,self.funder]):
-            try:
-                from eth_account import Account
-                self.account=Account.from_key(self.pk); self.signer=self.account.address
-                self.enabled=True; log.info(f"CLOB: {self.signer[:12]}...")
-            except ImportError: log.error("pip install eth-account")
-            except Exception as e: log.error(f"CLOB init: {e}")
+        self.sdk=None
+        if self.pk and (not DRY_RUN or all([self.api_key,self.api_secret,self.passphrase])):
+            self._init_sdk()
+
+    def _init_sdk(self):
+        try:
+            from eth_account import Account
+            from py_clob_client_v2 import ClobClient
+            from py_clob_client_v2.clob_types import ApiCreds
+            from py_clob_client_v2.order_utils.model.signature_type_v2 import SignatureTypeV2
+
+            self.account=Account.from_key(self.pk); self.signer=self.account.address
+            if not self.funder:
+                self.funder=self.signer
+
+            sig_type=(SignatureTypeV2(int(POLY_SIGNATURE_TYPE)) if POLY_SIGNATURE_TYPE
+                      else SignatureTypeV2.POLY_PROXY
+                      if self.funder.lower()!=self.signer.lower()
+                      else SignatureTypeV2.EOA)
+
+            creds=None
+            if all([self.api_key,self.api_secret,self.passphrase]):
+                creds=ApiCreds(self.api_key,self.api_secret,self.passphrase)
+
+            self.sdk=ClobClient(CLOB_BASE,CHAIN_ID,key=self.pk,creds=creds,
+                                signature_type=sig_type,funder=self.funder,
+                                use_server_time=True,retry_on_error=True)
+
+            if not creds:
+                log.info("CLOB API creds missing; deriving/creating via SDK...")
+                creds=self.sdk.create_or_derive_api_key()
+                self.sdk.set_api_creds(creds)
+                self.api_key=creds.api_key
+                self.api_secret=creds.api_secret
+                self.passphrase=creds.api_passphrase
+                os.environ["CLOB_API_KEY"]=self.api_key
+                os.environ["CLOB_API_SECRET"]=self.api_secret
+                os.environ["CLOB_API_PASSPHRASE"]=self.passphrase
+                log.info("CLOB API creds ready in memory; add them to .env/GitHub Secrets for faster startup.")
+
+            self.enabled=True
+            log.info(f"CLOB SDK: {self.signer[:12]}... sigType={int(sig_type)}")
+        except ImportError as e:
+            log.error(f"CLOB SDK unavailable: {e}. Run: pip install -r requirements_v9_2.txt")
+        except Exception as e:
+            log.error(f"CLOB init: {e}")
 
     def _l2(self,method,path,body="")->dict:
         ts=str(int(time.time())); msg=ts+method+path+body
@@ -1083,6 +1138,39 @@ class ClobOrderClient:
             message_types={"Order":self.ORDER_TYPE},
             message_data=od).signature.hex()
 
+    def _order_id(self,resp:Any)->str:
+        if isinstance(resp,dict):
+            return (resp.get("orderID") or resp.get("orderId") or resp.get("id") or
+                    resp.get("hash") or resp.get("order_hash") or "")
+        return str(resp or "")
+
+    def _place_sdk(self,token_id,limit_price,size_usdc,label,order_type="LIMIT")->Optional[OrderResult]:
+        if not self.sdk: return None
+        ts=datetime.now(timezone.utc).isoformat(); bshort=label[:20]
+        try:
+            from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderArgsV2, OrderType
+            if order_type=="MARKET":
+                args=MarketOrderArgsV2(token_id=str(token_id),amount=float(size_usdc),
+                                       side="BUY",order_type=OrderType.FOK,
+                                       user_usdc_balance=float(size_usdc))
+                resp=self.sdk.create_and_post_market_order(args,order_type=OrderType.FOK)
+            else:
+                price=round(max(0.01,min(0.99,float(limit_price))),4)
+                size=float(size_usdc)/price
+                args=OrderArgsV2(token_id=str(token_id),price=price,size=size,side="BUY",
+                                 expiration=0,user_usdc_balance=float(size_usdc))
+                resp=self.sdk.create_and_post_order(args,order_type=OrderType.GTC)
+            oid=self._order_id(resp)
+            log.info(f"  SDK {order_type} OK: ${size_usdc:.2f} id={oid[:12]}...")
+            return OrderResult(label,bshort,"",str(token_id),limit_price,size_usdc,
+                               order_id=oid,status="placed",placed_at=ts,
+                               order_type=order_type)
+        except Exception as e:
+            log.error(f"  SDK {order_type} FAILED: {e}")
+            return OrderResult(label,bshort,"",str(token_id),limit_price,size_usdc,
+                               status="failed",error=f"sdk:{e}",placed_at=ts,
+                               order_type=order_type)
+
     def _place(self,token_id,limit_price,size_usdc,label,order_type="LIMIT")->OrderResult:
         ts=datetime.now(timezone.utc).isoformat(); bshort=label[:20]
         if DRY_RUN:
@@ -1094,13 +1182,16 @@ class ClobOrderClient:
             return OrderResult(label,bshort,"",str(token_id or ""),
                                limit_price,size_usdc,status="failed",
                                error="CLOB disabled",placed_at=ts)
+        sdk_result=self._place_sdk(token_id,limit_price,size_usdc,label,order_type)
+        if sdk_result is not None:
+            return sdk_result
         price=round(max(0.01,min(0.99,limit_price)),4)
         ts_ms=int(time.time()*1000)
         # V2 order: no taker/expiration/nonce/feeRateBps → timestamp/metadata/builder
         od={"salt":ts_ms,"maker":self.funder,"signer":self.signer,
             "tokenId":int(token_id),"makerAmount":int(size_usdc*1e6),
             "takerAmount":int(size_usdc/price*1e6),
-            "side":0,"signatureType":0,
+            "side":0,"signatureType":1 if self.funder.lower()!=self.signer.lower() else 0,
             "timestamp":ts_ms,
             "metadata":self.ZERO32,
             "builder":self.ZERO32,
@@ -1114,8 +1205,10 @@ class ClobOrderClient:
         ZERO32H="0x"+"00"*32
         body={
             "salt":str(od["salt"]),"maker":od["maker"],"signer":od["signer"],
+            "taker":"0x0000000000000000000000000000000000000000",
             "tokenId":str(od["tokenId"]),
             "makerAmount":str(od["makerAmount"]),"takerAmount":str(od["takerAmount"]),
+            "expiration":"0","nonce":"0","feeRateBps":"0",
             "side":"BUY","signatureType":od["signatureType"],
             "timestamp":str(od["timestamp"]),
             "metadata":ZERO32H,"builder":ZERO32H,
@@ -1519,20 +1612,26 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
     city=extract_city(question) or \
          extract_city((ev.get("groupSlug") or ev.get("slug","")).replace("-"," "))
     if not city: log.info("  Skip: city unknown"); return None
+    log.info(f"  Analyze city={city}")
 
     target_date=extract_date(question)
     coords=CITY_COORDS[city]
+    log.info("  Fetch forecast...")
     mu_raw,_,lead=fetch_nwp(coords[0],coords[1],target_date)
     is_f="°f" in question.lower() or "fahrenheit" in question.lower()
     if is_f: mu_raw=mu_raw*9/5+32
 
     station=CITY_STATION.get(city,""); bias=STATION_BIAS.get(station,0.0)
     adj_mu=round(mu_raw+bias,2)
+    log.info("  Fetch ensemble...")
     sig_ens=fetch_ens_sigma(coords[0],coords[1])
+    log.info("  Fetch brackets...")
     brackets=fetch_brackets(ev)
     if not brackets: log.info("  Skip: no brackets"); return None
+    log.info(f"  Brackets: {len(brackets)}")
 
     month=target_date.month if target_date else datetime.now().month
+    log.info("  Run ensemble model...")
     ens=run_ensemble(city,adj_mu,sig_ens,lead,month,brackets)
     mu=ens.mu_ensemble; sigma=ens.sigma_ensemble
 
@@ -1556,12 +1655,16 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
 
     # Fetch CLOB books
     best_asks={}; best_bids={}
+    token_count=len({str(b.get("yes_token_id") or "") for b in brackets} |
+                    {str(b.get("no_token_id") or "") for b in brackets}) if clob.enabled else 0
+    if clob.enabled: log.info(f"  Fetch CLOB books: {token_count} tokens...")
     for b in brackets:
         for tok in [str(b.get("yes_token_id") or ""), str(b.get("no_token_id") or "")]:
             if tok and tok not in best_asks:
                 ask,bid=clob.get_book(tok) if clob.enabled else (None,None)
                 best_asks[tok]=ask; best_bids[tok]=bid
 
+    log.info("  Monte Carlo + edge calc...")
     mc_probs=m7_mc(mu,sigma,brackets,n_paths=50_000)
     dynamic_thr=brier.get_dynamic_threshold()
     bs_mult=brier.get_bs_kelly_mult()
@@ -1582,9 +1685,6 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
     mu_mkt=calc_implied_mu(brackets)
     ovr=bd[0]["overround"] if bd else 0.0
 
-    perf.log(slug,city,question,mu,sigma,mu_mkt,bd,ens.kl_total,
-             ens.skill_score,lead,age_h or 0,metar_updated,kelly_mode)
-
     # Age multiplier
     age_mult=(1.0 if (age_h or 99)<2 else 0.85 if (age_h or 99)<6
               else 0.70 if (age_h or 99)<12 else 0.50)
@@ -1593,7 +1693,17 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
                dynamic_thr+4 if (age_h or 99)<12 else dynamic_thr+6)
 
     order_results=[]
-    if kelly_mode!="DRY_RUN":
+    # Evaluasi order jalan baik live maupun DRY_RUN. Saat DRY_RUN, order
+    # disimulasikan di _place() (tidak dikirim ke exchange, tidak pakai uang).
+    eval_orders=(kelly_mode!="DRY_RUN") or DRY_RUN
+    if eval_orders:
+        log.info("  [DRY_RUN] Simulate order candidates..." if DRY_RUN
+                 else "  Evaluate live order candidates...")
+        _port_lim=bankroll*KELLY_PORT_PCT/MAX_MKTS
+        log.info(f"    caps: port_lim=${_port_lim:.2f}  kelly_max=${bankroll*KELLY_MAX_PCT:.2f}  "
+                 f"min_order=$1.00  age_thr={age_thr:.0f}pp  crowded={crowded}")
+        _n_sig=sum(1 for x in bd for s in ("yes_class","no_class") if x[s] in ("SIGNAL","STRONG"))
+        log.info(f"    SIGNAL/STRONG candidates: {_n_sig}")
         for b in bd:
             for side in ("YES","NO"):
                 cls  =b["yes_class"] if side=="YES" else b["no_class"]
@@ -1603,6 +1713,10 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
                 ask_ok=b.get("yes_ask_ok",True) if side=="YES" else b.get("no_ask_ok",True)
                 map_v=b["yes_map"] if side=="YES" else b["no_map"]
                 ask_v=b.get("yes_ask") if side=="YES" else b.get("no_ask")
+
+                # TEST MODE: paksa ukuran tetap untuk kandidat sinyal valid
+                if FORCE_ORDER_USDC>0 and cls in ("SIGNAL","STRONG"):
+                    stake=FORCE_ORDER_USDC
 
                 skip=""
                 if cls not in ("SIGNAL","STRONG"):  skip="below_cls"
@@ -1614,9 +1728,15 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
 
                 if side=="YES": b["skip_reason_yes"]=skip
                 else:           b["skip_reason_no"] =skip
+
+                if cls in ("STRONG","SIGNAL","NEAR"):
+                    log.info(f"    [{b['bracket_short']}] {side} cls={cls} "
+                             f"edge={edge:+.1f}pp stake=${stake:.2f} "
+                             f"ask={ask_v} map={map_v:.3f} → "
+                             f"{('SKIP '+skip) if skip else 'PLACING ORDER'}")
                 if skip: continue
 
-                adj_stake=stake*age_mult
+                adj_stake=stake if FORCE_ORDER_USDC>0 else stake*age_mult
                 ok,reason,adj_stake=risk_gate.check(bankroll,adj_stake,
                                                       brier.recent_bs(),bot_state)
                 if not ok:
@@ -1638,10 +1758,20 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
 
                 result.bracket_short=b["bracket_short"]; result.map_price=map_v
                 order_results.append(result)
+                # Catat ukuran order aktual ke bracket → perf.jsonl + RiskGate harian
+                # menghitung pengeluaran dengan benar lintas-run (penting di mode FORCE).
+                # Hanya untuk order live; DRY_RUN tidak boleh mengurangi jatah harian asli.
+                if not DRY_RUN:
+                    if side=="YES": b["stake_yes"]=round(adj_stake,2)
+                    else:           b["stake_no"] =round(adj_stake,2)
                 brier.record(slug,b["label"],b["p_blend"],side)
                 time.sleep(0.3)
 
     if city not in active_cities: active_cities.append(city)
+
+    # Log perf SETELAH order ditempatkan → stake & alasan skip yang tercatat akurat
+    perf.log(slug,city,question,mu,sigma,mu_mkt,bd,ens.kl_total,
+             ens.skill_score,lead,age_h or 0,metar_updated,kelly_mode)
 
     val_mode,val_msg=check_validation(brier,bankroll,
                                       bot_state.get("daily_start_bankroll",bankroll))
