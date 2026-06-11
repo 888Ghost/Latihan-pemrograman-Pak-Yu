@@ -10,7 +10,7 @@ try:
 except Exception:
     pass
 
-PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+PUSD = "0xA21e2db91C564fc4338e5F0af698398b32E6667f"
 RPCS = ("https://polygon-bor-rpc.publicnode.com", "https://rpc.ankr.com/polygon")
 
 
