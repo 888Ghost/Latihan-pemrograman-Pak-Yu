@@ -1,0 +1,105 @@
+# ═══════════════════════════════════════════════════════════════
+#  FAST SCAN — CRON TIAP 5 MENIT
+#  Tujuan: Masuk menit ke-2, bukan menit ke-15
+#
+#  Matematika competitive moat:
+#  α(t) = α(0) × e^(-λ×t)  λ=0.05/menit
+#  Menit ke-2:  α = α(0) × 0.905  = 90.5% edge
+#  Menit ke-15: α = α(0) × 0.472  = 47.2% edge
+#  Selisih: +43pp edge hanya karena 13 menit lebih cepat
+#
+#  Strategi: MARKET ORDER untuk STRONG signal (>20pp)
+#  → Guaranteed fill, tidak tunggu di order book
+#  → Cocok untuk edge yang akan menghilang cepat
+#
+#  Free untuk PUBLIC repo: unlimited GitHub Actions minutes
+#  Private repo: hitung 5 menit × 288 run/hari × ~3 menit = 864 min/hari
+# ═══════════════════════════════════════════════════════════════
+
+name: Fast Scan — New Markets Only (5 menit)
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run_override:
+        description: 'Override DRY_RUN (true/false/default=pakai Secret)'
+        default: 'default'
+
+jobs:
+  fast-scan:
+    name: Fast Scan New Markets
+    runs-on: ubuntu-latest
+    timeout-minutes: 4   # WAJIB: harus selesai sebelum cron 5 menit berikutnya
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: pip-v92-${{ hashFiles('requirements_v9_2.txt') }}
+          restore-keys: pip-v92-
+
+      - name: Install dependencies
+        run: pip install -r requirements_v9_2.txt -q
+
+      - name: Restore state
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            seen_markets.json
+            brier_scores.json
+            bankroll.json
+            pending_orders.json
+            bot_state.json
+            category_stats.json
+            price_history.json
+          key: bot-state-v92-${{ github.run_id }}
+          restore-keys: bot-state-v92-
+
+      - name: Run Fast Scan
+        env:
+          TELEGRAM_TOKEN:      ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          POLY_PRIVATE_KEY:    ${{ secrets.POLY_PRIVATE_KEY }}
+          POLY_FUNDER:         ${{ secrets.POLY_FUNDER }}
+          CLOB_API_KEY:        ${{ secrets.CLOB_API_KEY }}
+          CLOB_API_SECRET:     ${{ secrets.CLOB_API_SECRET }}
+          CLOB_API_PASSPHRASE: ${{ secrets.CLOB_API_PASSPHRASE }}
+          BANKROLL:            ${{ secrets.BANKROLL }}
+          DRY_RUN:             ${{ (github.event.inputs.dry_run_override != 'default' && github.event.inputs.dry_run_override) || secrets.DRY_RUN || 'true' }}
+          FAST_SCAN:           'true'   # HANYA cek market baru (<10 menit)
+        run: |
+          echo "[FAST SCAN] $(date -u '+%H:%M:%S UTC')"
+          python polymarket_v9_2.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            seen_markets.json
+            brier_scores.json
+            bankroll.json
+            pending_orders.json
+            bot_state.json
+            category_stats.json
+            price_history.json
+          key: bot-state-v92-${{ github.run_id }}
+
+      - name: Commit perf log
+        if: always()
+        run: |
+          git config --global user.email "polybot@noreply.github.com"
+          git config --global user.name "PolyBot Fast"
+          git add -f performance.jsonl 2>/dev/null || true
+          git diff --staged --quiet || (git commit -m "fast $(date -u '+%H:%M') [skip ci]" && git push) || true
