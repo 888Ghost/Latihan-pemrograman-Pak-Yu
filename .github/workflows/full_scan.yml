@@ -1,0 +1,122 @@
+# ═══════════════════════════════════════════════════════════════
+#  FULL SCAN — CRON TIAP 30 MENIT
+#  Tujuan: Tangkap market usia 2-12 jam yang masih punya edge
+#
+#  Berbeda dari Fast Scan:
+#  - Scan SEMUA weather markets (bukan hanya yang baru)
+#  - Threshold lebih ketat sesuai usia (10-14pp vs 8pp)
+#  - Kelly multiplier lebih kecil untuk market tua (×0.50-0.85)
+#  - Limit order (GTC) bukan market order
+#  - Timeout 12 menit (bisa scan 50+ market)
+#
+#  Berjalan tiap 30 menit = setiap 6 siklus Fast Scan
+#  Keduanya share state yang sama via GitHub Cache
+# ═══════════════════════════════════════════════════════════════
+
+name: Full Scan — All Weather Markets (30 menit)
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run_override:
+        description: 'Override DRY_RUN (true/false/default=pakai Secret)'
+        default: 'default'
+      bankroll_override:
+        description: 'Override bankroll (kosongkan = pakai Secret)'
+        default: ''
+
+jobs:
+  full-scan:
+    name: Full Scan All Markets
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: pip-v92-${{ hashFiles('requirements_v9_2.txt') }}
+          restore-keys: pip-v92-
+
+      - name: Install dependencies
+        run: pip install -r requirements_v9_2.txt -q
+
+      - name: Restore state
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            seen_markets.json
+            brier_scores.json
+            bankroll.json
+            pending_orders.json
+            bot_state.json
+            category_stats.json
+            price_history.json
+          key: bot-state-v92-${{ github.run_id }}
+          restore-keys: bot-state-v92-
+
+      - name: Run Full Scan
+        env:
+          TELEGRAM_TOKEN:      ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          POLY_PRIVATE_KEY:    ${{ secrets.POLY_PRIVATE_KEY }}
+          POLY_FUNDER:         ${{ secrets.POLY_FUNDER }}
+          CLOB_API_KEY:        ${{ secrets.CLOB_API_KEY }}
+          CLOB_API_SECRET:     ${{ secrets.CLOB_API_SECRET }}
+          CLOB_API_PASSPHRASE: ${{ secrets.CLOB_API_PASSPHRASE }}
+          BANKROLL:            ${{ github.event.inputs.bankroll_override || secrets.BANKROLL }}
+          DRY_RUN:             ${{ (github.event.inputs.dry_run_override != 'default' && github.event.inputs.dry_run_override) || secrets.DRY_RUN || 'true' }}
+          FAST_SCAN:           'false'  # Scan semua market
+        run: |
+          echo "[FULL SCAN] $(date -u '+%H:%M:%S UTC')"
+          python polymarket_v9_2.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            seen_markets.json
+            brier_scores.json
+            bankroll.json
+            pending_orders.json
+            bot_state.json
+            category_stats.json
+            price_history.json
+          key: bot-state-v92-${{ github.run_id }}
+
+      - name: Commit perf log
+        if: always()
+        run: |
+          git config --global user.email "polybot@noreply.github.com"
+          git config --global user.name "PolyBot Full"
+          git add -f performance.jsonl 2>/dev/null || true
+          git diff --staged --quiet || (git commit -m "full $(date -u '+%H:%M') [skip ci]" && git push) || true
+
+      # Summary hanya di full scan (bukan tiap 5 menit — terlalu noisy)
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Full Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Time | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
+          if [ -f bankroll.json ]; then
+            BL=$(python3 -c "import json;d=json.load(open('bankroll.json'));print(f\"\${d.get('bankroll',0):.2f}\")" 2>/dev/null||echo "n/a")
+            echo "| Bankroll | $BL |" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f brier_scores.json ]; then
+            BS=$(python3 -c "import json;d=json.load(open('brier_scores.json'));print(f\"n={d.get('n_resolved',0)} BS={d.get('cumulative_bs',0):.4f}\")" 2>/dev/null||echo "n/a")
+            echo "| Brier | $BS |" >> $GITHUB_STEP_SUMMARY
+          fi
