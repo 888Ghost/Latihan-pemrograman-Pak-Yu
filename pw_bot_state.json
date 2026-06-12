@@ -1,0 +1,10 @@
+{
+  "paused": false,
+  "update_offset": 0,
+  "daily_start_bankroll": 0.0,
+  "last_date": "",
+  "kelly_mode": "DRY_RUN",
+  "fill_count": 0,
+  "fill_total": 0.0,
+  "first_prediction_ts": ""
+}
