@@ -2542,7 +2542,7 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
     total_mkt_info=sum(b["yes_price"] for b in brackets)
     log.info(f"  temp_type={temp_type}  {len(brackets)} brackets  total_yes={total_mkt_info:.3f}")
 
-        # Age multiplier
+    # Age multiplier
     age_mult=(1.0 if (age_h or 99)<2 else 0.85 if (age_h or 99)<6
               else 0.70 if (age_h or 99)<12 else 0.50)
     age_thr  =(dynamic_thr if (age_h or 99)<2 else
@@ -2550,6 +2550,10 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
                dynamic_thr+4 if (age_h or 99)<12 else dynamic_thr+6)
 
     order_results=[]
+    # v9.3: ALWAYS process signals — even in DRY_RUN mode we create
+    # simulated entries so the user can track winrate before going live.
+    # In DRY_RUN: orders are virtual (no real money), but recorded for tracking.
+    # In LIVE: orders are placed on-chain via CLOB.
     for b in bd:
         for side in ("YES","NO"):
             cls  =b["yes_class"] if side=="YES" else b["no_class"]
@@ -2568,57 +2572,50 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
             elif not ask_ok:                    skip="above_MAP"
             elif crowded and cls!="STRONG":     skip="crowded_mkt"
 
-            if side=="YES":
-                b["skip_reason_yes"]=skip
-            else:
-                b["skip_reason_no"]=skip
-            if skip:
-                continue
+            if side=="YES": b["skip_reason_yes"]=skip
+            else:           b["skip_reason_no"] =skip
+            if skip: continue
 
             adj_stake=stake*age_mult
             ok,reason,adj_stake=risk_gate.check(bankroll,adj_stake,
                                                   brier.recent_bs(),bot_state)
             if not ok:
-                if side=="YES":
-                    b["skip_reason_yes"]=reason
-                else:
-                    b["skip_reason_no"]=reason
-                log.info(f"  RG: {reason}")
-                continue
+                if side=="YES": b["skip_reason_yes"]=reason
+                else:           b["skip_reason_no"] =reason
+                log.info(f"  RG: {reason}"); continue
 
-            if side=="YES":
-                base_ask=ask_v or b["yes_price"]
-            else:
-                base_ask=ask_v or (1-b["yes_price"])
+            # v9.3: Use yes_price directly as market probability
+            if side=="YES": base_ask=ask_v or b["yes_price"]
+            else:           base_ask=ask_v or (1-b["yes_price"])
             limit_price=min(round(base_ask+0.02,3),map_v)
 
+            # Execution tier: MARKET for STRONG, LIMIT for SIGNAL
             use_market = (cls=="STRONG" or force_market_order) and clob.enabled
 
             if DRY_RUN or kelly_mode=="DRY_RUN":
+                # SIMULATED entry — no real money, but tracked for winrate
                 ts_now=datetime.now(timezone.utc).isoformat()
                 otype="MARKET" if use_market else "LIMIT"
                 result=OrderResult(b["label"],b["bracket_short"],side,
                                    str(tok or ""),limit_price,adj_stake,
-                                   map_price=map_v,
-                                   order_id="SIM_"+b["bracket_short"],
-                                   status="simulated",
-                                   placed_at=ts_now,
-                                   order_type=otype)
+                                   map_price=map_v,order_id="SIM_"+b["bracket_short"],
+                                   status="simulated",placed_at=ts_now,order_type=otype)
                 log.info(f"  [SIMULATED] {otype} {side} ${adj_stake:.2f}@{limit_price:.3f} {b['bracket_short']}")
             else:
+                # LIVE entry — real money on-chain
                 if use_market:
                     result=clob.place_market_order(str(tok or ""),side,adj_stake,b["label"])
                 else:
                     result=clob.place_limit_order(str(tok or ""),side,limit_price,adj_stake,b["label"])
 
-            result.bracket_short=b["bracket_short"]
-            result.map_price=map_v
+            result.bracket_short=b["bracket_short"]; result.map_price=map_v
             order_results.append(result)
             brier.record(slug,b["label"],b["p_blend"],side)
             time.sleep(0.3)
-            
+
     if city not in active_cities: active_cities.append(city)
-            # Log performance AFTER orders (so order_results is populated)
+
+    # Log performance AFTER orders (so order_results is populated)
     perf.log(slug,city,question,mu,sigma,mu_mkt,bd,ens.kl_total,
              ens.skill_score,lead,age_h or 0,metar_updated,kelly_mode,
              order_results=order_results)
@@ -2630,7 +2627,8 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
                      ovr,_pf(vol),age_h,bd,bankroll,
                      brier.summary(),order_results,metar_updated,
                      kelly_mode,val_msg,crowded)
- return (msgs, order_results)
+    # v9.3: Return both msgs and order_results for bet tracking
+    return (msgs, order_results)
 
 # ══════════════════════════════════════════════════════════════════════════
 #  §24  MAIN
