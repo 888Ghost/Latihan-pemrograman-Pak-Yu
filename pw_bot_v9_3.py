@@ -62,11 +62,13 @@ METAR_BASE  = "https://www.aviationweather.gov/adds/dataserver_current/httpparam
 POLY_RPC    = "https://polygon-rpc.com"
 
 DEFAULT_BANKROLL  = _env_float("BANKROLL", "20")
-MIN_VOLUME        = 50.0
+MIN_VOLUME        = 50.0    # minimum volume for ESTABLISHED markets
+MIN_VOLUME_NEW    = 1.0     # minimum volume for NEW markets (age < 2h)
 COOLDOWN_H        = 6
 PAGES             = 5
 PAGE_LIMIT        = 100
-NEW_MARKET_WIN    = 10    # menit — pasar dianggap "baru" untuk fast scan
+NEW_MARKET_WIN    = 60    # menit — window untuk fast scan
+NEW_MARKET_FAST   = 120    # menit — window untuk re-evaluasi market yang belum di-betn
 
 # Kelly
 KELLY_FRACTION    = 0.50   # ½ Kelly: f_eff = f* × 0.50
@@ -78,6 +80,7 @@ EDGE_STRONG       = 20.0   # threshold market order (bukan limit)
 SPREAD_FLOOR      = 2.0
 
 STATE_FILE   = "pw_seen_markets.json"
+BET_FILE     = "pw_bet_markets.json"    # track markets where bet was actually placed
 BRIER_FILE   = "pw_brier_scores.json"
 PERF_FILE    = "pw_performance.jsonl"
 BANKROLL_FILE= "pw_bankroll.json"
@@ -458,6 +461,18 @@ def load_seen()->dict:
     cut=(datetime.now(timezone.utc)-timedelta(hours=48)).timestamp()
     return {k:v for k,v in data.items() if isinstance(v,float) and v>cut}
 
+def load_bet_markets()->dict:
+    data=safe_read(BET_FILE,{})
+    cut=(datetime.now(timezone.utc)-timedelta(hours=72)).timestamp()
+    return {k:v for k,v in data.items()
+            if isinstance(v,dict) and v.get("ts",0)>cut}
+
+def save_bet_market(slug:str, sides:list, edge:float):
+    data=safe_read(BET_FILE,{})
+    data[slug]={"ts":datetime.now(timezone.utc).timestamp(),
+                "sides":sides,"edge":round(edge,2)}
+    safe_write(BET_FILE,data)
+
 def load_bot_state()->dict:
     return safe_read(BOT_STATE,{"paused":False,"update_offset":0,
                                 "daily_start_bankroll":0.0,"last_date":"",
@@ -548,39 +563,47 @@ def _make_event(m:dict, event_slug:str)->dict:
             "endDate":m.get("endDate",""),"markets":[],"_raw":m}
 
 def scan_new_markets_only()->list:
-    """Fast scan: HANYA market yang dibuat dalam NEW_MARKET_WIN menit terakhir.
-    Digunakan oleh cron 5-menit. Mengambil edge SEBELUM crowd datang.
-    v9.3: Groups markets by event slug, fetches full event details."""
-    cutoff=datetime.now(timezone.utc)-timedelta(minutes=NEW_MARKET_WIN)
+    cutoff_new=datetime.now(timezone.utc)-timedelta(minutes=NEW_MARKET_WIN)
+    cutoff_reval=datetime.now(timezone.utc)-timedelta(minutes=NEW_MARKET_FAST)
+    bet_markets=load_bet_markets()
     event_slugs_seen=set()
     pool={}
     try:
         data=api_get(f"{GAMMA_BASE}/markets",{
             "active":"true","closed":"false",
-            "order":"createdAt","ascending":"false","limit":50})
+            "order":"createdAt","ascending":"false","limit":100})
         if not data: return []
         markets=data if isinstance(data,list) else data.get("data",[])
         for m in markets:
             created=m.get("createdAt","")
+            age_h=None
             if created:
                 try:
-                    if _parse_dt(created)<cutoff: break  # sorted desc, dapat berhenti
+                    dt=_parse_dt(created)
+                    age_h=(datetime.now(timezone.utc)-dt).total_seconds()/3600
+                    if dt<cutoff_reval: break
                 except: pass
             if not is_weather_market(m): continue
             mkt_slug=m.get("slug","")
             event_slug=m.get("groupSlug") or m.get("group_slug","") or _extract_event_slug(mkt_slug)
             if not event_slug: continue
+            if event_slug in bet_markets:
+                log.debug(f"  Skip bet-done: {event_slug[:40]}")
+                continue
             if event_slug not in event_slugs_seen:
                 event_slugs_seen.add(event_slug)
-                pool[event_slug]=_make_event(m,event_slug)
+                ev=_make_event(m,event_slug)
+                ev["_is_brand_new"]=(age_h is not None and age_h*60 < NEW_MARKET_WIN) if age_h else True
+                pool[event_slug]=ev
     except Exception as e: log.warning(f"New market scan: {e}")
-    # Enrich: fetch full event details for each event slug
     _enrich_events(pool)
-    # Moat 2: Exotic cities first — edge persists longer, less competition
     result = sorted(pool.values(),
-                    key=lambda ev: 0 if _is_exotic_event(ev) else 1)
+                    key=lambda ev: (0 if _is_exotic_event(ev) else 1,
+                                    0 if ev.get("_is_brand_new") else 1))
     exotic_n = sum(1 for ev in result if _is_exotic_event(ev))
-    log.info(f"[FAST_SCAN] {len(result)} new events | exotic: {exotic_n} (priority)")
+    brand_new_n = sum(1 for ev in result if ev.get("_is_brand_new"))
+    reval_n = len(result) - brand_new_n
+    log.info(f"[FAST_SCAN] {len(result)} events | brand_new: {brand_new_n} | re-eval: {reval_n} | exotic: {exotic_n} (priority)")
     return result
 
 def _scan_all_markets(pool, extra, label):
@@ -2607,7 +2630,7 @@ def analyze_and_bet(ev,bankroll,clob,risk_gate,brier,perf,
                      ovr,_pf(vol),age_h,bd,bankroll,
                      brier.summary(),order_results,metar_updated,
                      kelly_mode,val_msg,crowded)
-    return msgs
+ return (msgs, order_results)
 
 # ══════════════════════════════════════════════════════════════════════════
 #  §24  MAIN
@@ -2745,10 +2768,77 @@ def main():
         time.sleep(1.0)
 
     safe_write(STATE_FILE,seen); price_vel.save()
-    dur=(datetime.now(timezone.utc)-start).total_seconds()
-    log.info(f"\n{'='*65}\n  pw_ v9.3 DONE  sent={stats['sent']}  err={stats['skip_err']}"
-             f"  {dur:.0f}s  Kelly={kelly_mode}  Bankroll=${bankroll:.2f}\n{'='*65}")
+    seen=load_seen(); bet_markets=load_bet_markets(); now_ts=start.timestamp()
 
+    if FAST_SCAN:
+        events=scan_new_markets_only()
+        force_mkt_order=True
+        brand_new_n=sum(1 for ev in events if ev.get("_is_brand_new"))
+        reval_n=len(events)-brand_new_n
+        log.info(f"[FAST MODE] {len(events)} markets (brand_new: {brand_new_n}, re-eval: {reval_n})")
+    else:
+        all_ev=fetch_all_events()
+        events=[e for e in all_ev if _is_open(e)
+                and (e.get("groupSlug") or e.get("slug","")) not in bet_markets]
+        events.sort(key=lambda ev: 0 if _is_exotic_event(ev) else 1)
+        exotic_n=sum(1 for ev in events if _is_exotic_event(ev))
+        force_mkt_order=False
+        log.info(f"[FULL MODE] {len(events)} markets | exotic: {exotic_n} (priority)")
+
+    active_cities=[]; stats={"sent":0,"skip_vol":0,"skip_err":0,"bet_placed":0}
+
+    for ev in events:
+        slug=ev.get("groupSlug") or ev.get("slug","")
+        vol=ev["volume"]; q=ev["question"][:60]
+        age_h=_market_age_hours(ev)
+        age_s=(f"{age_h*60:.0f}min" if age_h and age_h<1
+               else (f"{age_h:.0f}h" if age_h else "?"))
+
+        min_vol = MIN_VOLUME_NEW if (age_h is not None and age_h < 2) else MIN_VOLUME
+        if vol < min_vol:
+            log.info(f"  Skip vol (${vol:.0f} < ${min_vol:.0f}): {q}")
+            stats["skip_vol"]+=1; continue
+
+        is_brand_new = ev.get("_is_brand_new", False)
+        tag = "🆕" if is_brand_new else "🔄"
+        log.info(f"→ {tag} [age {age_s}] vol=${vol:,.0f}  {q}")
+        log.info(f"  {ev['url']}")
+
+        try:
+            result=analyze_and_bet(ev,bankroll,clob,rg,brier,perf,
+                                  active_cities,bot_state,kelly_mode,
+                                  price_vel,cat_tracker,force_mkt_order,
+                                  calibrator=calibrator,
+                                  liq_filter=liq_filter,
+                                  start_bankroll=bot_state.get("daily_start_bankroll",bankroll))
+            if isinstance(result, tuple):
+                msgs, order_results = result
+            else:
+                msgs, order_results = result, []
+        except Exception as e:
+            log.error(f"  Error: {e}",exc_info=True)
+            msgs=None; order_results=[]; stats["skip_err"]+=1; continue
+
+        if not msgs: stats["skip_err"]+=1; continue
+
+        for i,m in enumerate(msgs):
+            send_telegram(m)
+            if i<len(msgs)-1: time.sleep(0.5)
+        seen[slug]=now_ts; stats["sent"]+=1
+
+        if order_results:
+            sides=[f"{r.side}_{r.bracket_short}" for r in order_results if hasattr(r,'side')]
+            max_edge=max((r.edge for r in order_results if hasattr(r,'edge')),default=0)
+            save_bet_market(slug, sides, max_edge)
+            stats["bet_placed"]+=1
+
+        log.info(f"  Sent ({len(msgs)} msgs) {'[BET PLACED]' if order_results else '[SCAN ONLY]'}")
+        time.sleep(1.0)
+
+    safe_write(STATE_FILE,seen); price_vel.save()
+    dur=(datetime.now(timezone.utc)-start).total_seconds()
+    log.info(f"\n{'='*65}\n  pw_ v9.3.1 DONE  sent={stats['sent']}  bet={stats['bet_placed']}"
+             f"  err={stats['skip_err']}  {dur:.0f}s  Kelly={kelly_mode}  Bankroll=${bankroll:.2f}\n{'='*65}")
 
 if __name__=="__main__":
     main()
