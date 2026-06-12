@@ -1,7 +1,7 @@
 name: PolyWeather Full Scan (30 min)
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0,30 * * * *'
   workflow_dispatch:
     inputs:
       bankroll_override:
@@ -40,6 +40,7 @@ jobs:
         with:
           path: |
             pw_seen_markets.json
+            pw_bet_markets.json
             pw_brier_scores.json
             pw_bankroll.json
             pw_bot_state.json
@@ -64,7 +65,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           POLY_PRIVATE_KEY: ${{ secrets.POLY_PRIVATE_KEY }}
           POLY_FUNDER: ${{ secrets.POLY_FUNDER }}
-          # CLOB_API_KEY/SECRET/PASSPHRASE are OPTIONAL — auto-derived from private_key+funder
           CLOB_API_KEY: ${{ secrets.CLOB_API_KEY }}
           CLOB_API_SECRET: ${{ secrets.CLOB_API_SECRET }}
           CLOB_API_PASSPHRASE: ${{ secrets.CLOB_API_PASSPHRASE }}
