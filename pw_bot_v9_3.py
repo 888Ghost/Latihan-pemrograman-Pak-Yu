@@ -2112,7 +2112,8 @@ class BrierTracker:
 #  §17  PERFORMANCE LOGGER
 # ══════════════════════════════════════════════════════════════════════════
 class PerfLogger:
-    def log(self,slug,city,q,mu,sigma,mu_mkt,bd,kl,skill,lead,age,metar,kelly_mode):
+    def log(self,slug,city,q,mu,sigma,mu_mkt,bd,kl,skill,lead,age,metar,kelly_mode,
+            order_results=None):
         entry={"ts":datetime.now(timezone.utc).isoformat(),"slug":slug,"city":city,
                "question":q[:80],"mu":mu,"sigma":sigma,"mu_mkt":mu_mkt,
                "kl":kl,"skill":skill,"lead_h":lead,
@@ -2125,6 +2126,10 @@ class PerfLogger:
                              "skip_yes":b["skip_reason_yes"],"skip_no":b["skip_reason_no"],
                              "kl":b["kl"],"rpn":b["rpn"],"is_tail":b["is_tail"],
                              } for b in bd]}
+        if order_results:
+            entry["entries"]=[{"side":o.side,"bracket":o.bracket_short,
+                               "price":o.limit_price,"size":o.size_usdc,
+                               "type":o.order_type,"status":o.status} for o in order_results]
         try:
             with open(PERF_FILE,"a") as f: f.write(json.dumps(entry)+"\n")
         except Exception as e: log.warning(f"Perf log: {e}")
