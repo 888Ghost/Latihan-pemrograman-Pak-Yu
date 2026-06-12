@@ -2046,7 +2046,7 @@ class BrierTracker:
         if bs<0.01: return 1.0
         return round(min(1.15,max(0.30,exp_bs/bs)),3)
     def summary(self)->str:
-        n=self.data["n_resolved"]; avg=self.data["cumulative_bs"]
+        n=self.data.get("n_resolved",0); avg=self.data.get("cumulative_bs",0.0)
         if n==0: return "BS=n/a (n=0)"
         exp=0.28*0.72; status="CALIBRATED" if avg<exp*1.30 else "NEEDS TUNING"
         return f"BS={avg:.4f} (n={n}) E[BS]={exp:.4f} {status}"
