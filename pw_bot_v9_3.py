@@ -2337,16 +2337,19 @@ def format_msgs(question,url,city,mu_raw,ens,lead,mu_mkt,ovr,vol,
             lines3.append(f"Closest: {best['bracket_short']} +{max(best['yes_edge'],best['no_edge']):.1f}pp")
         lines3.append("</pre>")
 
-        if order_results:
+    if order_results:
         is_sim = any(o.status=="simulated" for o in order_results)
         header = "SIMULATED ENTRIES" if is_sim else "ORDERS"
-        lines3.append(f"<b>{header}</b>"); lines3.append("<pre>")
+        lines3.append(f"<b>{header}</b>")
+        lines3.append("<pre>")
         for o in order_results:
             st="SIM" if o.status=="simulated" else ("DRY_RUN" if o.status=="dry_run" else o.status.upper())
             lines3.append(f"{o.side:<3} {o.bracket_short:<12} ${o.size_usdc:.2f}@{o.limit_price:.3f} {o.order_type} {st}")
-            if o.order_id and o.order_id not in ("DRY_RUN",""): 
-                if not o.order_id.startswith("SIM_"): lines3.append(f"    id=***{o.order_id[-6:]}")
-            if o.error: lines3.append(f"    err={o.error[:50]}")
+            if o.order_id and o.order_id not in ("DRY_RUN",""):
+                if not o.order_id.startswith("SIM_"):
+                    lines3.append(f"    id=***{o.order_id[-6:]}")
+            if o.error:
+                lines3.append(f"    err={o.error[:50]}")
         lines3.append("</pre>")
 
     lines3+=["<pre>",f"{brier_summary}  ${bankroll:.0f}",
