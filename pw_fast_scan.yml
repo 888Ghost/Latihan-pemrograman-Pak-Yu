@@ -1,0 +1,65 @@
+name: PolyWeather Fast Scan (5 min)
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  fast-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pw_requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install deps
+        run: pip install -r pw_requirements.txt
+
+      - name: Restore bot state
+        uses: actions/cache@v4
+        with:
+          path: |
+            pw_seen_markets.json
+            pw_brier_scores.json
+            pw_bankroll.json
+            pw_bot_state.json
+            category_stats.json
+            pw_price_history.json
+            pw_pending_orders.json
+            pw_performance.jsonl
+            pw_calibration.json
+          key: pw-bot-state-${{ github.run_id }}
+          restore-keys: pw-bot-state-
+
+      - name: Run Fast Scan
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          POLY_PRIVATE_KEY: ${{ secrets.POLY_PRIVATE_KEY }}
+          POLY_FUNDER: ${{ secrets.POLY_FUNDER }}
+          # CLOB_API_KEY/SECRET/PASSPHRASE are OPTIONAL — auto-derived from private_key+funder
+          CLOB_API_KEY: ${{ secrets.CLOB_API_KEY }}
+          CLOB_API_SECRET: ${{ secrets.CLOB_API_SECRET }}
+          CLOB_API_PASSPHRASE: ${{ secrets.CLOB_API_PASSPHRASE }}
+          BANKROLL: ${{ secrets.BANKROLL || '20' }}
+          DRY_RUN: ${{ secrets.DRY_RUN || 'true' }}
+          FAST_SCAN: 'true'
+        run: python pw_bot_v9_3.py
+
+      - name: Save performance log
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: pw_performance.jsonl
+          key: pw-perf-log-${{ github.run_id }}
