@@ -1,0 +1,93 @@
+# Polymarket Weather Bot - Single Workflow (v11.0)
+# ==================================================
+# Runs every 5 minutes. Both FAST_SCAN and FULL_SCAN modes now only
+# target new markets (age < NEW_MARKET_MAX_AGE_H = 3h).
+#
+# v11.0: Merged fast_scan.yml and full_scan.yml into a single workflow.
+# The distinction between fast and full scan is now just how many
+# pages of API results we check for new markets.
+#
+# FAST_SCAN=false means we do a broader search (more pages), which is
+# better for catching new markets that might not appear in the first
+# page of results.
+
+name: Polymarket Weather Bot
+
+on:
+  schedule:
+    # Run every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run in DRY_RUN mode'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      BANKROLL: ${{ secrets.BANKROLL || '20' }}
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}
+      FAST_SCAN: 'false'
+      NEW_MARKET_MAX_AGE_H: '3.0'
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      POLY_PRIVATE_KEY: ${{ secrets.POLY_PRIVATE_KEY }}
+      POLY_FUNDER: ${{ secrets.POLY_FUNDER }}
+      CLOB_API_KEY: ${{ secrets.CLOB_API_KEY }}
+      CLOB_API_SECRET: ${{ secrets.CLOB_API_SECRET }}
+      CLOB_API_PASSPHRASE: ${{ secrets.CLOB_API_PASSPHRASE }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create data directories
+        run: |
+          mkdir -p data logs
+
+      - name: Restore data from cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data
+            logs
+          key: pw-bot-data-${{ github.run_id }}
+          restore-keys: |
+            pw-bot-data-
+
+      - name: Run bot
+        run: |
+          echo "=== Polymarket Weather Bot v11.0 ==="
+          echo "DRY_RUN: $DRY_RUN"
+          echo "FAST_SCAN: $FAST_SCAN"
+          echo "NEW_MARKET_MAX_AGE_H: $NEW_MARKET_MAX_AGE_H"
+          python -m src.main
+
+      - name: Save data to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data
+            logs
+          key: pw-bot-data-${{ github.run_id }}
