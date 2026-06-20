@@ -1,0 +1,91 @@
+# ═══════════════════════════════════════════════════════════════════
+#  .gitignore — Polymarket Weather Bot v13.1
+#  WAJIB ada di root repo. File-file ini TIDAK BOLEH pernah masuk git.
+# ═══════════════════════════════════════════════════════════════════
+
+# ── SECRETS — JANGAN PERNAH COMMIT ───────────────────────────────
+# Kunci privat, token, passphrase, semua credentials
+.env
+.env.local
+.env.production
+.env.staging
+*.key
+*.pem
+*.p12
+secrets.json
+credentials.json
+wallet_credentials.json
+
+# ── DIREKTORI STATE — dikelola oleh bot via git commit ───────────
+# Bot v13.1 menyimpan state ke data/ melalui workflow git push.
+# File-file ini DI-COMMIT secara otomatis oleh GitHub Actions.
+# Jangan commit secara manual — biarkan workflow yang mengelola.
+# Kalau mau lihat state lokal tanpa pollute git, uncomment baris di bawah:
+# data/*.json
+# data/*.jsonl
+# logs/
+
+# ── PYTHON ARTIFACTS ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+.mypy_cache/
+.ruff_cache/
+
+# ── VIRTUAL ENVIRONMENT ───────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+ENV/
+.python-version
+
+# ── IDE / EDITOR ──────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+
+# ── TESTING & COVERAGE ────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+
+# ── LOCAL LOGS & TEMP ─────────────────────────────────────────────
+*.log
+local_*.json
+local_*.jsonl
+tmp/
+temp/
+
+# ── ARSITEKTUR LAMA — jangan diupload ke repo ini ─────────────────
+# File-file di bawah ini adalah sisa arsitektur lama yang sudah
+# digantikan oleh v13.1. Kalau terlanjur ada di repo, hapus.
+speed_entry_bot.py
+speed_entry.yml
+fast_scan.yml
+full_scan.yml
+trading-bot.yml
+polymarket_bot_v9_1.yml
+polymarket_v9_2.py
+speed_seen.json
+speed_brier.json
+speed_bankroll.json
+speed_perf.jsonl
+generate_credentials.py
+wallet_status.py
+dry_run_manager.py
