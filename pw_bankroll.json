@@ -1,6 +1,0 @@
-{
-  "bankroll": 20.0,
-  "source": "default",
-  "ts": "2026-06-13T00:00:00+00:00",
-  "note": "Starting default — bot will replace with live wallet balance on first run"
-}
