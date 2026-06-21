@@ -43,7 +43,7 @@ v12.0 CRITICAL FIXES from external audit (FATAL #2):
 import math
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
 
 from src.pw_adaptive_kelly import AdaptiveKelly as _AKelly
 _ak = _AKelly()  # v13.0 Bug#6: now connected
