@@ -14,6 +14,8 @@ v11.0 changes from v10.x:
   - No other major changes
 """
 
+from typing import Optional
+
 # ============================================================================
 # Weather Keywords for Market Detection
 # ============================================================================
