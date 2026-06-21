@@ -35,7 +35,7 @@ import time
 import numpy as np
 from scipy.stats import norm
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
 
 from src.config import OWM_BASE, ENS_BASE, METAR_BASE
 from src.lookup_tables import (
