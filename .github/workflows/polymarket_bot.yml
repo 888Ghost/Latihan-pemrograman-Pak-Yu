@@ -115,7 +115,7 @@ jobs:
         run: |
           echo "[v13.1] $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "FAST_SCAN=$FAST_SCAN  DRY_RUN=$DRY_RUN"
-          echo "BANKROLL=${BANKROLL:-'(default $20)'}"
+          echo "BANKROLL=${BANKROLL:-(default 20 USD)}"
           python -m src.main
 
       # v13.1 Bug#10 fix: commit ALL critical state files via git,
